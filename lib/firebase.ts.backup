@@ -1,0 +1,387 @@
+import { initializeApp } from 'firebase/app';
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  getDocs,
+  doc,
+  getDoc,
+  query,
+  where,
+  orderBy,
+  limit as limitFn,
+  deleteDoc,
+  updateDoc,
+  arrayUnion,
+  arrayRemove
+} from 'firebase/firestore';
+import { getAuth, Auth } from 'firebase/auth';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import * as FileSystem from 'expo-file-system/legacy';
+
+const firebaseConfig = {
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+};
+
+console.log('🔥 Firebase Config:', {
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY ? '✅ Set' : '❌ Missing',
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN ? '✅ Set' : '❌ Missing',
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ? '✅ Set' : '❌ Missing',
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET ? '✅ Set' : '❌ Missing',
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ? '✅ Set' : '❌ Missing',
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID ? '✅ Set' : '❌ Missing',
+});
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// Initialize auth - Firebase v11 handles persistence automatically
+const auth = getAuth(app);
+
+const storage = getStorage(app);
+
+console.log('🔥 Firebase initialized successfully');
+
+export { app, db, auth, storage };
+
+export interface Property {
+  id?: string;
+  name: string;
+  address: string;
+  price: string;
+  rating?: number; // Now optional, calculated from reviews
+  type: string;
+  bedrooms: number;
+  bathrooms: number;
+  area: number;
+  image: string;
+  agent: {
+    name: string;
+    email: string;
+    avatar: string;
+  };
+  facilities: string[];
+  description: string;
+  reviews: Array<{
+    id: string;
+    rating: number;
+    comment: string;
+    public?: boolean;
+    user: {
+      name: string;
+      avatar: string;
+      email: string;
+    };
+  }>;
+  gallery: Array<{
+    id: string;
+    image: string;
+  }>;
+  createdAt?: Date;
+  sold?: boolean;
+  ownerId?: string; // User ID of the property owner/creator
+  owner?: {
+    name: string;
+    email: string;
+    avatar?: string;
+  };
+}
+
+export const addProperty = async (propertyData: Omit<Property, 'id' | 'createdAt'>) => {
+  const docRef = await addDoc(collection(db, 'properties'), {
+    ...propertyData,
+    createdAt: new Date()
+  });
+  return { id: docRef.id, ...propertyData };
+};
+
+/**
+ * Helper function to read file as base64 (Expo compatible)
+ * Uses expo-file-system for reliable file reading
+ */
+const readFileAsBase64 = async (uri: string): Promise<string> => {
+  try {
+    // Read file as base64 using expo-file-system
+    // Note: In newer versions, encoding is a string literal
+    const base64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: 'base64' as any,
+    });
+    return base64;
+  } catch (error) {
+    console.error('Error reading file as base64:', error);
+    throw error;
+  }
+};
+
+/**
+ * Upload a single property image to Firebase Storage
+ * @param imageUri - Local file URI from ImagePicker
+ * @returns Download URL of the uploaded image
+ */
+export const uploadPropertyImage = async (imageUri: string): Promise<string> => {
+  try {
+    console.log('🔥 Firebase Storage: Uploading property image:', imageUri);
+
+    // Read file as base64
+    const base64 = await readFileAsBase64(imageUri);
+
+    // Get file extension
+    const fileExt = imageUri.split('.').pop() || 'jpg';
+    const fileName = `properties/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+
+    // Create storage reference
+    const imageRef = ref(storage, fileName);
+
+    // Convert base64 to Uint8Array for React Native compatibility
+    // Remove data URL prefix if present (e.g., "data:image/jpeg;base64,")
+    const base64Data = base64.includes(',') ? base64.split(',')[1] : base64;
+    
+    // Convert base64 string to binary
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    // Upload file using bytes (React Native compatible)
+    await uploadBytes(imageRef, bytes);
+
+    // Get download URL
+    const downloadURL = await getDownloadURL(imageRef);
+    console.log('🔥 Firebase Storage: Image uploaded successfully:', downloadURL);
+
+    return downloadURL;
+  } catch (error: any) {
+    console.error('🔥 Firebase Storage: Error uploading property image:', error);
+    console.error('Error details:', {
+      code: error?.code,
+      message: error?.message,
+      serverResponse: error?.serverResponse,
+    });
+    throw error;
+  }
+};
+
+/**
+ * Upload a user avatar to Firebase Storage
+ * @param imageUri - Local file URI from ImagePicker
+ * @param userId - User ID for unique file naming
+ * @returns Download URL of the uploaded avatar
+ */
+export const uploadUserAvatar = async (imageUri: string, userId: string): Promise<string> => {
+  try {
+    console.log('🔥 Firebase Storage: Uploading user avatar:', imageUri, 'for user:', userId);
+
+    // Verify user is authenticated
+    if (!auth.currentUser) {
+      throw new Error('User must be authenticated to upload files');
+    }
+
+    // Read file as base64
+    const base64 = await readFileAsBase64(imageUri);
+    console.log('🔥 File read as base64, length:', base64.length);
+
+    // Get file extension
+    const fileExt = imageUri.split('.').pop() || 'jpg';
+    const fileName = `avatars/${userId}-${Date.now()}.${fileExt}`;
+    console.log('🔥 Uploading to path:', fileName);
+
+    // Create storage reference
+    const avatarRef = ref(storage, fileName);
+
+    // Convert base64 to Uint8Array for React Native compatibility
+    // Remove data URL prefix if present (e.g., "data:image/jpeg;base64,")
+    const base64Data = base64.includes(',') ? base64.split(',')[1] : base64;
+    
+    // Convert base64 string to binary
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    // Upload file using bytes (React Native compatible)
+    console.log('🔥 Starting upload...');
+    await uploadBytes(avatarRef, bytes);
+    console.log('🔥 Upload completed, getting download URL...');
+
+    // Get download URL
+    const downloadURL = await getDownloadURL(avatarRef);
+    console.log('🔥 Firebase Storage: Avatar uploaded successfully:', downloadURL);
+
+    return downloadURL;
+  } catch (error: any) {
+    console.error('🔥 Firebase Storage: Error uploading user avatar:', error);
+    console.error('Error details:', {
+      code: error?.code,
+      message: error?.message,
+      serverResponse: error?.serverResponse,
+      stack: error?.stack,
+    });
+    throw error;
+  }
+};
+
+/**
+ * Upload multiple property images to Firebase Storage
+ * @param uris - Array of local file URIs from ImagePicker
+ * @returns Array of download URLs
+ */
+export const uploadImagesToFirebase = async (uris: string[]): Promise<string[]> => {
+  const urls: string[] = [];
+
+  for (const uri of uris) {
+    try {
+      const url = await uploadPropertyImage(uri);
+      urls.push(url);
+    } catch (error) {
+      console.error('🔥 Firebase Storage: Error uploading image:', uri, error);
+      // Continue with other images even if one fails
+    }
+  }
+
+  return urls;
+};
+
+export const getProperties = async (filter?: string, searchQuery?: string, limitCount?: number, includeSold?: boolean) => {
+  console.log('🔥 Firebase: Getting properties with filter:', filter, 'search:', searchQuery, 'limit:', limitCount, 'includeSold:', includeSold);
+
+  try {
+    let q = collection(db, 'properties');
+    let constraints: any[] = [];
+
+    if (filter && filter !== 'All') {
+      constraints.push(where('type', '==', filter));
+    }
+    constraints.push(orderBy('createdAt', 'desc'));
+    // Only apply limit if there is no search query
+    if (!searchQuery && limitCount) {
+      constraints.push(limitFn(limitCount));
+    }
+
+    const qRef = constraints.length ? query(q, ...constraints) : q;
+    console.log('🔥 Firebase: Executing query with constraints:', constraints.length);
+
+    const querySnapshot = await getDocs(qRef);
+    console.log('🔥 Firebase: Query returned', querySnapshot.size, 'documents');
+
+    let properties: Property[] = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      console.log('🔥 Firebase: Document data:', doc.id, data);
+      properties.push({ id: doc.id, ...data } as Property);
+    });
+
+    if (searchQuery) {
+      const searchTerm = searchQuery.toLowerCase();
+      properties = properties.filter(property =>
+        property.name.toLowerCase().includes(searchTerm) ||
+        property.address.toLowerCase().includes(searchTerm) ||
+        property.type.toLowerCase().includes(searchTerm)
+      );
+    }
+
+    // Filter out sold properties unless includeSold is true
+    if (!includeSold) {
+      properties = properties.filter(property => !property.sold);
+    }
+
+    console.log('🔥 Firebase: Returning', properties.length, 'properties');
+    return properties;
+  } catch (error) {
+    console.error('🔥 Firebase: Error getting properties:', error);
+    throw error;
+  }
+};
+
+export const getPropertyById = async (id: string) => {
+  console.log('🔥 Firebase: Getting property by ID:', id);
+
+  try {
+    const docRef = doc(db, 'properties', id);
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      console.log('🔥 Firebase: Property found:', data);
+      return { id: docSnap.id, ...data } as Property;
+    }
+    console.log('🔥 Firebase: Property not found for ID:', id);
+    return null;
+  } catch (error) {
+    console.error('🔥 Firebase: Error getting property by ID:', error);
+    throw error;
+  }
+};
+
+export const getLatestProperties = async () => {
+  console.log('🔥 Firebase: Getting latest properties');
+
+  try {
+    const qRef = query(
+      collection(db, 'properties'),
+      orderBy('createdAt', 'desc'),
+      limitFn(3)
+    );
+    const querySnapshot = await getDocs(qRef);
+    console.log('🔥 Firebase: Latest query returned', querySnapshot.size, 'documents');
+
+    const properties: Property[] = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      console.log('🔥 Firebase: Latest document data:', doc.id, data);
+      properties.push({ id: doc.id, ...data } as Property);
+    });
+
+    console.log('🔥 Firebase: Returning', properties.length, 'latest properties');
+    return properties;
+  } catch (error) {
+    console.error('🔥 Firebase: Error getting latest properties:', error);
+    throw error;
+  }
+};
+
+export const deleteProperty = async (id: string) => {
+  try {
+    await deleteDoc(doc(db, 'properties', id));
+    console.log('🔥 Firebase: Property deleted:', id);
+  } catch (error) {
+    console.error('🔥 Firebase: Error deleting property:', error);
+    throw error;
+  }
+};
+
+export const markPropertyAsSold = async (id: string, owner: { name: string; email: string; avatar?: string }) => {
+  const docRef = doc(db, 'properties', id);
+  await updateDoc(docRef, { sold: true, owner });
+};
+
+export const markPropertyAsUnsold = async (id: string) => {
+  const docRef = doc(db, 'properties', id);
+  await updateDoc(docRef, { sold: false, owner: null });
+};
+
+export const addReviewToProperty = async (propertyId: string, review: { rating: number; comment: string; user: { name: string; avatar: string; email: string; } }) => {
+  const docRef = doc(db, 'properties', propertyId);
+  const reviewWithId = { ...review, id: `${Date.now()}-${Math.random()}`, public: false };
+  await updateDoc(docRef, { reviews: arrayUnion(reviewWithId) });
+};
+
+export const approveReview = async (propertyId: string, reviewId: string) => {
+  const docRef = doc(db, 'properties', propertyId);
+  const propertySnap = await getDoc(docRef);
+  if (!propertySnap.exists()) return;
+  const property = propertySnap.data() as Property;
+  const updatedReviews = property.reviews.map(r => r.id === reviewId ? { ...r, public: true } : r);
+  await updateDoc(docRef, { reviews: updatedReviews });
+};
+
+export const getAverageRating = (property: Property) => {
+  if (!property.reviews || property.reviews.length === 0) return 0;
+  const ratings = property.reviews.map(r => r.rating);
+  return ratings.reduce((a, b) => a + b, 0) / ratings.length;
+}; 
